@@ -1,11 +1,14 @@
 const PREFIX = '/';
 const MAX_REDIRECTS = 3;
 
-// 严格的安全正则表达式
+// 同步加固的正则表达式
 const VALID_PATTERNS = [
-    /^(?:https?:\/\/)?github\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+\/(?:releases|archive|blob|raw|info|git-|tags).*/i,
-    /^(?:https?:\/\/)?raw\.(?:githubusercontent|github)\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+\/.+/i,
-    /^(?:https?:\/\/)?gist\.(?:githubusercontent|github)\.com\/[a-zA-Z0-9_.-]+\/.+/i
+    /^(?:https?:\/\/)?github\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+\/(?:releases|archive|blob|raw|info|git-|tags)[^ ]*/i,
+    /^(?:https?:\/\/)?raw\.(?:githubusercontent|github)\.com\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+\/[^ ]+/i,
+    /^(?:https?:\/\/)?gist\.(?:githubusercontent|github)\.com\/[a-zA-Z0-9_.-]+\/[^ ]+/i,
+    /^(?:https?:\/\/)?api\.github\.com\/[^ ]+/i,
+    /^(?:https?:\/\/)?git\.io\/[^ ]+/i,
+    /^(?:https?:\/\/)?gitlab\.com\/[^ ]+/i
 ];
 
 export default {
@@ -25,15 +28,34 @@ async function handleProxy(request) {
     if (path) return Response.redirect('https://' + urlObj.host + PREFIX + path, 301);
 
     path = urlObj.href.slice(urlObj.origin.length + PREFIX.length).replace(/^https?:\/+/, 'https://');
-    if (!path || path === '/') return new Response("GitHub Proxy is running.", { status: 200 });
+    
+    // 防自循环嵌套
+    const exp0 = 'https://' + urlObj.host + PREFIX;
+    while (path.startsWith(exp0)) {
+        path = path.replace(exp0, '');
+    }
+    
+    if (!path || path === '/') return new Response("GitHub Proxy is running securely.", { status: 200 });
+
+    // Shell 脚本深层嵌套动态改写
+    if (path === 'perl-pe-para') {
+        const perlstr = 'perl -pe';
+        const responseText = `s#(bash.*?\\.sh)([^/\\w\\d])#\\1 | ${perlstr} "\\$(curl -L ${urlObj.origin}/perl-pe-para)" \\2#g; s# (git)# https://\\1#g; s#(http.*?git[^/]*?/)#${urlObj.origin}/\\1#g`;
+        return new Response(responseText, { 
+            status: 200, 
+            headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'max-age=300' }
+        });
+    }
 
     if (!VALID_PATTERNS.some(pattern => pattern.test(path))) {
-        return new Response("Forbidden: Invalid GitHub resource target.", { status: 403 });
+        return new Response("Forbidden: Invalid resource target.", { status: 403 });
     }
 
     if (/^(?:https?:\/\/)?github\.com\/.+?\/.+?\/blob\//i.test(path)) {
         path = path.replace('/blob/', '/raw/');
     }
+    
+    if (path.startsWith('git')) path = 'https://' + path;
     if (!path.startsWith('http')) path = 'https://' + path;
 
     const reqHeaders = new Headers(request.headers);
