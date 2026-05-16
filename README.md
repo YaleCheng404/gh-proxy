@@ -1,118 +1,64 @@
-# gh-proxy
+# 高性能 GitHub 代理服务 (gh-proxy)
 
-## 简介
+一个纯粹、极简且高并发的 GitHub 资源加速代理服务。移除了所有通用化复杂配置，专注于提供稳定、安全的 `clone`、`release`、`archive` 及项目文件加速服务。
 
-github release、archive以及项目文件的加速项目，支持clone，有Cloudflare Workers无服务器版本以及Python版本
+## 核心特性
+* **双版本支持**：提供基于现代 ES Module 语法的 Cloudflare Workers 版本，以及基于 FastAPI + HTTPX 异步架构的 Python 版本。
+* **安全加固**：内置严格的针对 GitHub 域名的正则表达式过滤，有效防御 SSRF（服务器端请求伪造）、恶意重定向循环及滥用风险。
+* **极致性能**：Python 版本采用全异步流式转发（StreamingResponse），抛弃了传统的 Nginx+uWSGI 繁重架构，大幅降低内存占用并提升并发吞吐量。
 
-## 演示
+---
 
-[https://gh.api.99988866.xyz/](https://gh.api.99988866.xyz/)
+## 使用方法
 
-演示站为公共服务，如有大规模使用需求请自行部署，演示站有点不堪重负
+直接在您要下载的 GitHub 资源 URL 前拼接您的代理服务地址即可。
 
-![imagea272c95887343279.png](https://img.maocdn.cn/img/2021/04/24/imagea272c95887343279.png)
+### 示例（假设您的服务域名为 `proxy.example.com`）：
+* **分支源码**：`https://proxy.example.com/https://github.com/user/repo/archive/master.zip`
+* **Release 文件**：`https://proxy.example.com/https://github.com/user/repo/releases/download/v1.0.0/file.zip`
+* **Raw 文件**：`https://proxy.example.com/https://raw.githubusercontent.com/user/repo/master/file.txt`
+* **Git Clone**：`git clone https://proxy.example.com/https://github.com/user/repo.git`
 
-当然也欢迎[捐赠](#捐赠)以支持作者
+---
 
-## python版本和cf worker版本差异
+## 部署指南
 
-- python版本支持进行文件大小限制，超过设定返回原地址 [issue #8](https://github.com/hunshcn/gh-proxy/issues/8)
+### 1. Cloudflare Workers 部署
+1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)，进入 Workers & Pages。
+2. 创建一个新的 Worker。
+3. 将项目中的 `index.js` 代码完整复制到编辑器中。
+4. 点击 **Save and deploy**（保存并部署）即可。
 
-- python版本支持特定user/repo 封禁/白名单 以及passby [issue #41](https://github.com/hunshcn/gh-proxy/issues/41)
+### 2. Python / Docker 部署（推荐）
+项目提供了基于高性能 ASGI 服务器 Uvicorn 的轻量化镜像构建方案。
 
-## 使用
-
-直接在copy出来的url前加`https://gh.api.99988866.xyz/`即可
-
-也可以直接访问，在input输入
-
-***大量使用请自行部署，以上域名仅为演示使用。***
-
-访问私有仓库可以通过
-
-`git clone https://user:TOKEN@ghproxy.com/https://github.com/xxxx/xxxx` [#71](https://github.com/hunshcn/gh-proxy/issues/71)
-
-以下都是合法输入（仅示例，文件不存在）：
-
-- 分支源码：https://github.com/hunshcn/project/archive/master.zip
-
-- release源码：https://github.com/hunshcn/project/archive/v0.1.0.tar.gz
-
-- release文件：https://github.com/hunshcn/project/releases/download/v0.1.0/example.zip
-
-- 分支文件：https://github.com/hunshcn/project/blob/master/filename
-
-- commit文件：https://github.com/hunshcn/project/blob/1111111111111111111111111111/filename
-
-- gist：https://gist.githubusercontent.com/cielpy/351557e6e465c12986419ac5a4dd2568/raw/cmd.py
-
-## cf worker版本部署
-
-首页：https://workers.cloudflare.com
-
-注册，登陆，`Start building`，取一个子域名，`Create a Worker`。
-
-复制 [index.js](https://cdn.jsdelivr.net/gh/hunshcn/gh-proxy@master/index.js)  到左侧代码框，`Save and deploy`。如果正常，右侧应显示首页。
-
-`ASSET_URL`是静态资源的url（实际上就是现在显示出来的那个输入框单页面）
-
-`PREFIX`是前缀，默认（根路径情况为"/"），如果自定义路由为example.com/gh/*，请将PREFIX改为 '/gh/'，注意，少一个杠都会错！
-
-## Python版本部署
-
-### Docker部署
+#### 使用 Docker 一键运行：
+```bash
+# 自动构建并启动异步高性能服务
+docker build -t gh-proxy-async .
+docker run -d --name gh-proxy -p 80:80 --restart=always gh-proxy-async
 
 ```
-docker run -d --name="gh-proxy-py" \
-  -p 0.0.0.0:80:80 \
-  --restart=always \
-  hunsh/gh-proxy-py:latest
+
+#### 本地直接运行：
+
+1. 安装依赖：
+```bash
+pip install fastapi uvicorn httpx
+
 ```
 
-第一个80是你要暴露出去的端口
 
-### 直接部署
+2. 启动服务：
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 80 --workers 2
 
-安装依赖（请使用python3）
-
-```pip install flask requests```
-
-按需求修改`app/main.py`的前几项配置
-
-*注意:* 可能需要在`return Response`前加两行
-```python3
-if 'Transfer-Encoding' in headers:
-    headers.pop('Transfer-Encoding')
 ```
 
-### 注意
 
-python版本的机器如果无法正常访问github.io会启动报错，请自行修改静态文件url
 
-python版本默认走服务器（2021.3.27更新）
+---
 
-## Cloudflare Workers计费
+## 版权与致谢
 
-到 `overview` 页面可参看使用情况。免费版每天有 10 万次免费请求，并且有每分钟1000次请求的限制。
-
-如果不够用，可升级到 $5 的高级版本，每月可用 1000 万次请求（超出部分 $0.5/百万次请求）。
-
-## Changelog
-
-* 2020.04.10 增加对`raw.githubusercontent.com`文件的支持
-* 2020.04.09 增加Python版本（使用Flask）
-* 2020.03.23 新增了clone的支持
-* 2020.03.22 初始版本
-
-## 链接
-
-[我的博客](https://hunsh.net)
-
-## 参考
-
-[jsproxy](https://github.com/EtherDream/jsproxy/)
-
-## 捐赠
-
-![wx.png](https://img.maocdn.cn/img/2021/04/24/image.md.png)
-![ali.png](https://www.helloimg.com/images/2021/04/24/BK9vmb.md.png)
+本项目的核心路由匹配与代理转发逻辑源自 [hunshcn/gh-proxy](https://github.com/hunshcn/gh-proxy) 的优秀开源贡献，基于 MIT 协议分发。本项目在其基础上进行了全异步架构现代化重构与安全加固。
