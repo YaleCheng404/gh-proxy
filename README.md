@@ -7,7 +7,8 @@
 - `github.com/<owner>/<repo>/releases|archive|blob|raw|info|git-|tags`
 - `raw.githubusercontent.com`、`raw.github.com`
 - `gist.githubusercontent.com`、`gist.github.com`
-- `api.github.com`、`git.io`、`gitlab.com`
+- `api.github.com`、`git.io`、`gitlab.com`、`gitlab.net`
+- GitHub Pages 与 GitLab Pages：`*.github.io`、`*.gitlab.io`
 - GitHub 官方下载重定向域名（最多跟随 3 次）
 
 其它主机、非标准 HTTPS 端口和不匹配的 GitHub 路径会返回 `403`。首次上游请求保留 `Authorization`；跨主机下载重定向会移除它，并始终移除 `Proxy-Authorization`、Cookie、客户端 IP、转发链和逐跳头部。
@@ -69,12 +70,12 @@ python -m unittest discover -s tests -p "test_*.py"
 
 | 组件 | 版本 | 来源 |
 | --- | ---: | --- |
-| Python | 3.14.6 | [python.org](https://www.python.org/downloads/) |
-| FastAPI | 0.139.0 | [PyPI](https://pypi.org/project/fastapi/) |
-| Uvicorn | 0.51.0 | [PyPI](https://pypi.org/project/uvicorn/) |
+| Python | 3.14.7 | [python.org](https://www.python.org/downloads/) |
+| FastAPI | 0.141.1 | [PyPI](https://pypi.org/project/fastapi/) |
+| Uvicorn | 0.52.1 | [PyPI](https://pypi.org/project/uvicorn/) |
 | HTTPX | 0.28.1 | [PyPI](https://pypi.org/project/httpx/) |
-| Wrangler | 4.110.0 | [npm](https://www.npmjs.com/package/wrangler) |
-| pip（镜像构建） | 26.1.2 | [PyPI](https://pypi.org/project/pip/) |
+| Wrangler | 4.120.0 | [npm](https://www.npmjs.com/package/wrangler) |
+| pip（镜像构建） | 26.2.1 | [PyPI](https://pypi.org/project/pip/) |
 
 Python 的直接与解析依赖、基础镜像补丁版本均已固定；npm 的完整解析结果由 `package-lock.json` 保存。
 

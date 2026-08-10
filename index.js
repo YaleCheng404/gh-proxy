@@ -4,16 +4,19 @@ const HEALTH_TEXT = 'GitHub Proxy is running securely.';
 const FORBIDDEN_TEXT = 'Forbidden: Invalid resource target.';
 
 const OWNER_REPO = '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+';
-const TARGET_PATHS = new Map([
-  ['github.com', new RegExp(`^/${OWNER_REPO}/(?:releases|archive|blob|raw|info|git-|tags)(?:/|$)`, 'i')],
-  ['raw.githubusercontent.com', new RegExp(`^/${OWNER_REPO}/.+`, 'i')],
-  ['raw.github.com', new RegExp(`^/${OWNER_REPO}/.+`, 'i')],
-  ['gist.githubusercontent.com', /^\/[A-Za-z0-9_.-]+\/.+/i],
-  ['gist.github.com', /^\/[A-Za-z0-9_.-]+\/.+/i],
-  ['api.github.com', /^\/.+/],
-  ['git.io', /^\/.+/],
-  ['gitlab.com', /^\/.+/],
-]);
+const HOST_PATTERNS = [
+  { host: 'github.com', path: new RegExp(`^/${OWNER_REPO}/(?:releases|archive|blob|raw|info|git-|tags)(?:/|$)`, 'i') },
+  { host: 'raw.githubusercontent.com', path: new RegExp(`^/${OWNER_REPO}/.+`, 'i') },
+  { host: 'raw.github.com', path: new RegExp(`^/${OWNER_REPO}/.+`, 'i') },
+  { host: 'gist.githubusercontent.com', path: /^\/[A-Za-z0-9_.-]+\/.+/i },
+  { host: 'gist.github.com', path: /^\/[A-Za-z0-9_.-]+\/.+/i },
+  { host: 'api.github.com', path: /^\/.+/ },
+  { host: 'git.io', path: /^\/.+/ },
+  { host: 'gitlab.com', path: /^\/.+/ },
+  { host: 'gitlab.net', path: /^\/.+/ },
+  { host: '*.github.io', path: /^\/.+/ },
+  { host: '*.gitlab.io', path: /^\/.+/ },
+];
 const REDIRECT_HOSTS = new Set([
   'codeload.github.com',
   'objects.githubusercontent.com',
@@ -44,6 +47,15 @@ const RESPONSE_HEADERS_TO_DROP = [
   'set-cookie',
   'transfer-encoding',
 ];
+const RATE_LIMIT = {
+  ipWindowMs: 60 * 1000,      // 1 minute
+  ipMaxRequests: 10,          // per single IP
+  globalWindowMs: 1000,       // 1 second
+  globalMaxRequests: 5,       // all sources combined
+  maxFileSize: 100 * 1024 * 1024, // 100 MiB
+};
+const perIpRequests = new Map();
+let globalRequests = [];
 
 export default {
   async fetch(request) {
@@ -60,6 +72,13 @@ export default {
 };
 
 async function handle(request) {
+  if (!allowRateLimit(clientIp(request))) {
+    return text('Too Many Requests', 429, { 'retry-after': '1' });
+  }
+  if (isTooLarge(request.headers.get('content-length'))) {
+    return text('Request Entity Too Large', 413);
+  }
+
   const current = new URL(request.url);
   const queryTarget = current.searchParams.get('q');
   if (queryTarget) {
@@ -117,9 +136,17 @@ function parseTarget(rawTarget, base) {
   }
 }
 
+function hostMatches(host, pattern) {
+  if (pattern.startsWith('*.')) return host.endsWith(pattern.slice(1));
+  return host === pattern;
+}
+
 function isAllowed(url) {
   if (url.port && url.port !== '443') return false;
-  return TARGET_PATHS.get(url.hostname.toLowerCase())?.test(url.pathname) === true;
+  const host = url.hostname.toLowerCase();
+  return HOST_PATTERNS.some(({ host: pat, path: regex }) =>
+    hostMatches(host, pat) && regex.test(url.pathname)
+  );
 }
 
 function canFollow(url, method) {
@@ -143,6 +170,11 @@ async function proxy(request, target, redirects = 0) {
     } else if (redirect) {
       headers.set('location', redirect.href);
     }
+  }
+
+  if (isTooLarge(headers.get('content-length'))) {
+    await upstream.body?.cancel();
+    return text('Request Entity Too Large', 413);
   }
 
   headers.set('access-control-allow-origin', '*');
@@ -199,4 +231,42 @@ function text(body, status = 200, headers = {}) {
   });
 }
 
-export { extractTarget, isAllowed, parseTarget };
+
+function prune(timestamps, windowMs, now) {
+  while (timestamps.length && timestamps[0] <= now - windowMs) timestamps.shift();
+}
+
+function clientIp(request) {
+  return request.headers.get('cf-connecting-ip')
+    || request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    || 'unknown';
+}
+
+function allowRateLimit(ip, now = Date.now()) {
+  prune(globalRequests, RATE_LIMIT.globalWindowMs, now);
+  if (globalRequests.length >= RATE_LIMIT.globalMaxRequests) return false;
+
+  let bucket = perIpRequests.get(ip);
+  if (!bucket) {
+    bucket = [];
+    perIpRequests.set(ip, bucket);
+  }
+  prune(bucket, RATE_LIMIT.ipWindowMs, now);
+  if (bucket.length >= RATE_LIMIT.ipMaxRequests) return false;
+
+  globalRequests.push(now);
+  bucket.push(now);
+  return true;
+}
+
+function resetRateLimits() {
+  perIpRequests.clear();
+  globalRequests = [];
+}
+
+function isTooLarge(contentLength) {
+  const n = Number(contentLength);
+  return Number.isFinite(n) && n > RATE_LIMIT.maxFileSize;
+}
+
+export { extractTarget, isAllowed, parseTarget, allowRateLimit, resetRateLimits, clientIp, isTooLarge };

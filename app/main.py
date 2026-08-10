@@ -1,4 +1,6 @@
 import re
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from urllib.parse import urljoin
 
@@ -13,17 +15,26 @@ METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 HEALTH_TEXT = "GitHub Proxy is running securely."
 FORBIDDEN_TEXT = "Forbidden: Invalid resource target."
 
+IP_WINDOW_SECONDS = 60
+IP_MAX_REQUESTS = 10
+GLOBAL_WINDOW_SECONDS = 1
+GLOBAL_MAX_REQUESTS = 5
+MAX_FILE_SIZE = 100 * 1024 * 1024
+
 OWNER_REPO = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
-TARGET_PATHS = {
-    "github.com": re.compile(rf"^/{OWNER_REPO}/(?:releases|archive|blob|raw|info|git-|tags)(?:/|$)", re.I),
-    "raw.githubusercontent.com": re.compile(rf"^/{OWNER_REPO}/.+", re.I),
-    "raw.github.com": re.compile(rf"^/{OWNER_REPO}/.+", re.I),
-    "gist.githubusercontent.com": re.compile(r"^/[A-Za-z0-9_.-]+/.+", re.I),
-    "gist.github.com": re.compile(r"^/[A-Za-z0-9_.-]+/.+", re.I),
-    "api.github.com": re.compile(r"^/.+"),
-    "git.io": re.compile(r"^/.+"),
-    "gitlab.com": re.compile(r"^/.+"),
-}
+HOST_PATTERNS = [
+    ("github.com", re.compile(rf"^/{OWNER_REPO}/(?:releases|archive|blob|raw|info|git-|tags)(?:/|$)", re.I)),
+    ("raw.githubusercontent.com", re.compile(rf"^/{OWNER_REPO}/.+", re.I)),
+    ("raw.github.com", re.compile(rf"^/{OWNER_REPO}/.+", re.I)),
+    ("gist.githubusercontent.com", re.compile(r"^/[A-Za-z0-9_.-]+/.+", re.I)),
+    ("gist.github.com", re.compile(r"^/[A-Za-z0-9_.-]+/.+", re.I)),
+    ("api.github.com", re.compile(r"^/.+")),
+    ("git.io", re.compile(r"^/.+")),
+    ("gitlab.com", re.compile(r"^/.+")),
+    ("gitlab.net", re.compile(r"^/.+")),
+    ("*.github.io", re.compile(r"^/.+")),
+    ("*.gitlab.io", re.compile(r"^/.+")),
+]
 REDIRECT_HOSTS = {
     "codeload.github.com",
     "objects.githubusercontent.com",
@@ -69,14 +80,58 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+_per_ip_requests: dict[str, deque[float]] = defaultdict(deque)
+_global_requests: deque[float] = deque()
+
+
+def _prune(timestamps: deque[float], window: float, now: float) -> None:
+    while timestamps and timestamps[0] <= now - window:
+        timestamps.popleft()
+
+
+def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def allow_request(ip: str, now: float | None = None) -> bool:
+    now = time.monotonic() if now is None else now
+    _prune(_global_requests, GLOBAL_WINDOW_SECONDS, now)
+    if len(_global_requests) >= GLOBAL_MAX_REQUESTS:
+        return False
+    bucket = _per_ip_requests[ip]
+    _prune(bucket, IP_WINDOW_SECONDS, now)
+    if len(bucket) >= IP_MAX_REQUESTS:
+        return False
+    _global_requests.append(now)
+    bucket.append(now)
+    return True
+
+
+def reset_rate_limits() -> None:
+    _per_ip_requests.clear()
+    _global_requests.clear()
+
+
+def is_too_large(content_length: str | None) -> bool:
+    return content_length is not None and int(content_length) > MAX_FILE_SIZE
+
 
 @app.get("/")
-async def index(q: str | None = None):
+async def index(request: Request, q: str | None = None):
+    if not allow_request(client_ip(request)):
+        return PlainTextResponse("Too Many Requests", 429, headers={"retry-after": "1"})
     return RedirectResponse(f"/{q.lstrip('/')}", 301) if q else PlainTextResponse(HEALTH_TEXT)
 
 
 @app.api_route("/{raw_target:path}", methods=METHODS)
 async def handler(request: Request, raw_target: str):
+    if not allow_request(client_ip(request)):
+        return PlainTextResponse("Too Many Requests", 429, headers={"retry-after": "1"})
+    if is_too_large(request.headers.get("content-length")):
+        return PlainTextResponse("Request Entity Too Large", 413)
     if is_preflight(request):
         return preflight(request)
 
@@ -122,9 +177,17 @@ def parse_target(raw_target: str, query: str = "") -> httpx.URL | None:
         return None
 
 
+def _host_matches(host: str, pattern: str) -> bool:
+    if pattern.startswith("*."):
+        return host.endswith(pattern[1:])
+    return host == pattern
+
 def is_allowed(url: httpx.URL) -> bool:
-    path = TARGET_PATHS.get((url.host or "").lower())
-    return url.scheme == "https" and url.port in {None, 443} and bool(path and path.match(url.path))
+    host = (url.host or "").lower()
+    return url.scheme == "https" and url.port in {None, 443} and any(
+        _host_matches(host, pat) and path.match(url.path)
+        for pat, path in HOST_PATTERNS
+    )
 
 
 def can_follow(url: httpx.URL, method: str) -> bool:
@@ -136,6 +199,9 @@ def can_follow(url: httpx.URL, method: str) -> bool:
 
 async def proxy(request: Request, target: httpx.URL, redirects: int = 0):
     response = await send_upstream(request, target, redirects == 0)
+    if is_too_large(response.headers.get("content-length")):
+        await response.aclose()
+        return PlainTextResponse("Request Entity Too Large", 413)
     location = response.headers.get("location")
     redirect = parse_redirect(location, str(target)) if location else None
 
