@@ -1,12 +1,13 @@
 import re
 import time
-from collections import defaultdict, deque
+from collections import deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urljoin
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 MAX_REDIRECTS = 3
@@ -14,6 +15,7 @@ CHUNK_SIZE = 64 * 1024
 METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 HEALTH_TEXT = "GitHub Proxy is running securely."
 FORBIDDEN_TEXT = "Forbidden: Invalid resource target."
+PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
 
 IP_WINDOW_SECONDS = 60
 IP_MAX_REQUESTS = 10
@@ -23,7 +25,7 @@ MAX_FILE_SIZE = 100 * 1024 * 1024
 
 OWNER_REPO = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
 HOST_PATTERNS = [
-    ("github.com", re.compile(rf"^/{OWNER_REPO}/(?:releases|archive|blob|raw|info|git-|tags)(?:/|$)", re.I)),
+    ("github.com", re.compile(rf"^/{OWNER_REPO}/(?:releases|archive|blob|raw|info|git-upload-pack|git-receive-pack|tags)(?:/|$)", re.I)),
     ("raw.githubusercontent.com", re.compile(rf"^/{OWNER_REPO}/.+", re.I)),
     ("raw.github.com", re.compile(rf"^/{OWNER_REPO}/.+", re.I)),
     ("gist.githubusercontent.com", re.compile(r"^/[A-Za-z0-9_.-]+/.+", re.I)),
@@ -80,7 +82,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-_per_ip_requests: dict[str, deque[float]] = defaultdict(deque)
+_per_ip_requests: dict[str, deque[float]] = {}
 _global_requests: deque[float] = deque()
 
 
@@ -98,11 +100,14 @@ def client_ip(request: Request) -> str:
 
 def allow_request(ip: str, now: float | None = None) -> bool:
     now = time.monotonic() if now is None else now
+    for key, bucket in list(_per_ip_requests.items()):
+        _prune(bucket, IP_WINDOW_SECONDS, now)
+        if not bucket:
+            del _per_ip_requests[key]
     _prune(_global_requests, GLOBAL_WINDOW_SECONDS, now)
     if len(_global_requests) >= GLOBAL_MAX_REQUESTS:
         return False
-    bucket = _per_ip_requests[ip]
-    _prune(bucket, IP_WINDOW_SECONDS, now)
+    bucket = _per_ip_requests.setdefault(ip, deque())
     if len(bucket) >= IP_MAX_REQUESTS:
         return False
     _global_requests.append(now)
@@ -116,14 +121,29 @@ def reset_rate_limits() -> None:
 
 
 def is_too_large(content_length: str | None) -> bool:
-    return content_length is not None and int(content_length) > MAX_FILE_SIZE
+    return bool(content_length and re.fullmatch(r"[0-9]+", content_length) and float(content_length) > MAX_FILE_SIZE)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def index(request: Request, q: str | None = None):
-    if not allow_request(client_ip(request)):
-        return PlainTextResponse("Too Many Requests", 429, headers={"retry-after": "1"})
-    return RedirectResponse(f"/{q.lstrip('/')}", 301) if q else PlainTextResponse(HEALTH_TEXT)
+    if q and q.strip():
+        return RedirectResponse(f"{str(request.base_url).rstrip('/')}/{q.strip().lstrip('/')}", 301)
+    return FileResponse(PUBLIC_DIR / "index.html")
+
+
+@app.api_route("/healthz", methods=["GET", "HEAD"])
+async def health(request: Request):
+    return PlainTextResponse("" if request.method == "HEAD" else HEALTH_TEXT)
+
+
+@app.api_route("/index.html", methods=["GET", "HEAD"])
+async def homepage():
+    return FileResponse(PUBLIC_DIR / "index.html")
+
+
+@app.api_route("/github.svg", methods=["GET", "HEAD"])
+async def icon():
+    return FileResponse(PUBLIC_DIR / "github.svg")
 
 
 @app.api_route("/{raw_target:path}", methods=METHODS)
@@ -136,8 +156,6 @@ async def handler(request: Request, raw_target: str):
         return preflight(request)
 
     target = strip_nested_proxy(raw_target, str(request.base_url).rstrip("/"))
-    if not target:
-        return PlainTextResponse(HEALTH_TEXT)
     if target == "perl-pe-para":
         return perl_rewrite(str(request.base_url).rstrip("/"))
 
@@ -206,11 +224,11 @@ async def proxy(request: Request, target: httpx.URL, redirects: int = 0):
     redirect = parse_redirect(location, str(target)) if location else None
 
     if redirect and is_allowed(redirect):
-        return stream_response(response, f"/{redirect}")
+        return stream_response(response, f"/{redirect}", request.method)
     if redirect and redirects < MAX_REDIRECTS and can_follow(redirect, request.method):
         await response.aclose()
         return await proxy(request, redirect, redirects + 1)
-    return stream_response(response, str(redirect) if redirect else None)
+    return stream_response(response, str(redirect) if redirect else None, request.method)
 
 
 async def send_upstream(
@@ -234,7 +252,7 @@ def parse_redirect(location: str, base: str) -> httpx.URL | None:
     return parse_target(urljoin(base, location))
 
 
-def stream_response(response: httpx.Response, location: str | None) -> StreamingResponse:
+def stream_response(response: httpx.Response, location: str | None, method: str) -> Response:
     headers = dict(response.headers)
     if location:
         headers["location"] = location
@@ -244,6 +262,8 @@ def stream_response(response: httpx.Response, location: str | None) -> Streaming
         "access-control-allow-origin": "*",
         "access-control-expose-headers": "*",
     })
+    if method == "HEAD":
+        return Response(status_code=response.status_code, headers=headers, background=BackgroundTask(response.aclose))
     return StreamingResponse(
         response.aiter_raw(CHUNK_SIZE),
         status_code=response.status_code,

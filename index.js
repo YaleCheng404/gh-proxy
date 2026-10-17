@@ -5,7 +5,7 @@ const FORBIDDEN_TEXT = 'Forbidden: Invalid resource target.';
 
 const OWNER_REPO = '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+';
 const HOST_PATTERNS = [
-  { host: 'github.com', path: new RegExp(`^/${OWNER_REPO}/(?:releases|archive|blob|raw|info|git-|tags)(?:/|$)`, 'i') },
+  { host: 'github.com', path: new RegExp(`^/${OWNER_REPO}/(?:releases|archive|blob|raw|info|git-upload-pack|git-receive-pack|tags)(?:/|$)`, 'i') },
   { host: 'raw.githubusercontent.com', path: new RegExp(`^/${OWNER_REPO}/.+`, 'i') },
   { host: 'raw.github.com', path: new RegExp(`^/${OWNER_REPO}/.+`, 'i') },
   { host: 'gist.githubusercontent.com', path: /^\/[A-Za-z0-9_.-]+\/.+/i },
@@ -48,19 +48,19 @@ const RESPONSE_HEADERS_TO_DROP = [
   'transfer-encoding',
 ];
 const RATE_LIMIT = {
-  ipWindowMs: 60 * 1000,      // 1 minute
-  ipMaxRequests: 10,          // per single IP
-  globalWindowMs: 1000,       // 1 second
-  globalMaxRequests: 5,       // all sources combined
-  maxFileSize: 100 * 1024 * 1024, // 100 MiB
+  ipWindowMs: 60 * 1000,
+  ipMaxRequests: 10,
+  globalWindowMs: 1000,
+  globalMaxRequests: 5,
+  maxFileSize: 100 * 1024 * 1024,
 };
 const perIpRequests = new Map();
 let globalRequests = [];
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     try {
-      return await handle(request);
+      return await handle(request, env);
     } catch (error) {
       console.error(JSON.stringify({
         message: 'proxy request failed',
@@ -71,7 +71,24 @@ export default {
   },
 };
 
-async function handle(request) {
+async function handle(request, env) {
+  const current = new URL(request.url);
+  if (['GET', 'HEAD'].includes(request.method)) {
+    if (current.pathname === '/') {
+      const queryTarget = current.searchParams.get('q')?.trim();
+      if (queryTarget) {
+        return Response.redirect(`${current.origin}/${queryTarget.replace(/^\/+/, '')}`, 301);
+      }
+      return env.ASSETS.fetch(new Request(`${current.origin}/index.html`, request));
+    }
+    if (current.pathname === '/healthz') {
+      return text(request.method === 'HEAD' ? null : HEALTH_TEXT);
+    }
+    if (['/index.html', '/github.svg'].includes(current.pathname)) {
+      return env.ASSETS.fetch(request);
+    }
+  }
+
   if (!allowRateLimit(clientIp(request))) {
     return text('Too Many Requests', 429, { 'retry-after': '1' });
   }
@@ -79,16 +96,9 @@ async function handle(request) {
     return text('Request Entity Too Large', 413);
   }
 
-  const current = new URL(request.url);
-  const queryTarget = current.searchParams.get('q');
-  if (queryTarget) {
-    return Response.redirect(`${current.origin}/${queryTarget.replace(/^\/+/, '')}`, 301);
-  }
-
   if (isPreflight(request)) return preflight(request);
 
   const rawTarget = extractTarget(current);
-  if (!rawTarget) return text(HEALTH_TEXT);
   if (rawTarget === 'perl-pe-para') return perlRewrite(current.origin);
 
   const target = parseTarget(rawTarget);
@@ -158,6 +168,10 @@ function canFollow(url, method) {
 async function proxy(request, target, redirects = 0) {
   const upstream = await fetch(target.href, upstreamInit(request, redirects === 0));
   const headers = new Headers(upstream.headers);
+  if (isTooLarge(headers.get('content-length'))) {
+    await upstream.body?.cancel();
+    return text('Request Entity Too Large', 413);
+  }
   const location = headers.get('location');
 
   if (location) {
@@ -172,16 +186,12 @@ async function proxy(request, target, redirects = 0) {
     }
   }
 
-  if (isTooLarge(headers.get('content-length'))) {
-    await upstream.body?.cancel();
-    return text('Request Entity Too Large', 413);
-  }
-
   headers.set('access-control-allow-origin', '*');
   headers.set('access-control-expose-headers', '*');
   RESPONSE_HEADERS_TO_DROP.forEach(header => headers.delete(header));
 
-  return new Response(upstream.body, {
+  if (request.method === 'HEAD') await upstream.body?.cancel();
+  return new Response(request.method === 'HEAD' ? null : upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers,
@@ -230,8 +240,6 @@ function text(body, status = 200, headers = {}) {
     headers: { 'content-type': 'text/plain; charset=utf-8', ...headers },
   });
 }
-
-
 function prune(timestamps, windowMs, now) {
   while (timestamps.length && timestamps[0] <= now - windowMs) timestamps.shift();
 }
@@ -243,6 +251,10 @@ function clientIp(request) {
 }
 
 function allowRateLimit(ip, now = Date.now()) {
+  for (const [key, bucket] of perIpRequests) {
+    prune(bucket, RATE_LIMIT.ipWindowMs, now);
+    if (!bucket.length) perIpRequests.delete(key);
+  }
   prune(globalRequests, RATE_LIMIT.globalWindowMs, now);
   if (globalRequests.length >= RATE_LIMIT.globalMaxRequests) return false;
 
@@ -251,7 +263,6 @@ function allowRateLimit(ip, now = Date.now()) {
     bucket = [];
     perIpRequests.set(ip, bucket);
   }
-  prune(bucket, RATE_LIMIT.ipWindowMs, now);
   if (bucket.length >= RATE_LIMIT.ipMaxRequests) return false;
 
   globalRequests.push(now);
@@ -265,8 +276,7 @@ function resetRateLimits() {
 }
 
 function isTooLarge(contentLength) {
-  const n = Number(contentLength);
-  return Number.isFinite(n) && n > RATE_LIMIT.maxFileSize;
+  return /^\d+$/.test(contentLength ?? '') && Number(contentLength) > RATE_LIMIT.maxFileSize;
 }
 
-export { extractTarget, isAllowed, parseTarget, allowRateLimit, resetRateLimits, clientIp, isTooLarge };
+export { isAllowed, parseTarget, allowRateLimit, resetRateLimits, isTooLarge };

@@ -1,0 +1,7 @@
+*
+!requirements.txt
+!app/
+!app/main.py
+!public/
+!public/index.html
+!public/github.svg

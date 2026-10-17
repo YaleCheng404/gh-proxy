@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="GitHub 文件、Release 和源码下载加速。">
+  <meta name="theme-color" content="#0e90d2">
+  <title>GitHub Accelerator</title>
+  <link rel="icon" href="/github.svg" type="image/svg+xml">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; min-height: 100svh; display: flex; flex-direction: column; color: #333; font: 15px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    .hero { flex: 1; min-height: 420px; padding: 100px 24px 80px; background: linear-gradient(45deg, #fff4eb 0%, #fcedf3 30%, #eef0f8 58%, #e5f7f7 78%, #eef8ef 100%); }
+    h1 { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 0 0 44px; color: #000; font-size: 32px; line-height: 1.3; }
+    h1 img { width: 35px; height: 35px; }
+    h1 span { color: #999; font-weight: 300; }
+    form { max-width: 610px; margin: auto; }
+    label { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    input { display: block; width: 100%; min-width: 0; height: 40px; padding: 8px 10px; border: 1px solid #c9c9c9; border-radius: 0; background: #fff; color: #333; font: inherit; }
+    input::placeholder { color: #999; }
+    button { margin-top: 24px; padding: 7px 15px; border: 1px solid #0e90d2; border-radius: 0; background: #0e90d2; color: #fff; font: inherit; font-size: 14px; cursor: pointer; }
+    button:hover { border-color: #0b76ac; background: #0b76ac; }
+    :focus-visible { outline: 2px solid #0879b5; outline-offset: 3px; }
+    footer { padding: 22px clamp(24px, 5vw, 64px) 28px; background: #fff; }
+    .details { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; max-width: 1200px; margin: auto; }
+    p { margin: 0 0 14px; }
+    p:last-child { margin-bottom: 0; }
+    ul { margin: 14px 0 0; padding-left: 24px; }
+    li, code { overflow-wrap: anywhere; }
+    code { font: inherit; }
+    .clone { display: block; margin-top: 5px; color: #666; }
+    @media (max-width: 640px) {
+      .hero { min-height: 360px; padding: 70px 24px 64px; }
+      h1 { gap: 8px; margin-bottom: 36px; font-size: clamp(23px, 6vw, 30px); }
+      h1 img { width: 30px; height: 30px; }
+      .details { grid-template-columns: 1fr; gap: 24px; }
+      footer { padding: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="hero">
+    <h1><img src="/github.svg" alt="" width="35" height="35">GitHub <span>Accelerator</span></h1>
+    <form action="/" method="get" target="_blank" rel="noopener">
+      <label for="url">输入 GitHub 文件链接</label>
+      <input id="url" name="q" type="text" placeholder="输入 GitHub 文件链接：" required spellcheck="false" autocomplete="off" autocapitalize="off" enterkeyhint="go">
+      <button type="submit">加速下载</button>
+    </form>
+  </main>
+  <footer>
+    <div class="details">
+      <section aria-label="使用说明">
+        <p>GitHub 文件链接带不带协议头都可以，支持 Release 文件、源码压缩包和单个文件。复制链接后，粘贴到上方即可加速下载。</p>
+        <p>也可以直接在资源链接前加上本站地址。支持 raw、Gist、GitHub API、GitLab 和 Pages 资源。</p>
+        <p>Clone 用法：<code class="clone" id="clone">git clone https://proxy.example.com/https://github.com/user/project.git</code></p>
+        <p>注意，不支持直接下载项目文件夹。</p>
+      </section>
+      <section aria-label="链接示例">
+        <p>可用链接示例：</p>
+        <ul>
+          <li>分支源码：<code>https://github.com/user/project/archive/main.zip</code></li>
+          <li>Release 源码：<code>https://github.com/user/project/archive/v0.1.0.tar.gz</code></li>
+          <li>Release 文件：<code>https://github.com/user/project/releases/download/v0.1.0/example.zip</code></li>
+          <li>分支文件：<code>https://github.com/user/project/blob/main/filename</code></li>
+        </ul>
+      </section>
+    </div>
+  </footer>
+  <script>
+    const input = document.querySelector('#url');
+    input.addEventListener('input', () => input.setCustomValidity(''));
+    input.addEventListener('invalid', () => {
+      if (!input.value.trim()) input.setCustomValidity('请输入需要加速的资源链接');
+    });
+    document.querySelector('form').addEventListener('submit', event => {
+      input.value = input.value.trim();
+      if (!input.value) {
+        event.preventDefault();
+        input.setCustomValidity('请输入需要加速的资源链接');
+        input.reportValidity();
+      }
+    });
+    document.querySelector('#clone').textContent = `git clone ${location.origin}/https://github.com/user/project.git`;
+  </script>
+</body>
+</html>
