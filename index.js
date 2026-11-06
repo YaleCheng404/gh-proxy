@@ -1,6 +1,6 @@
 const MAX_REDIRECTS = 3;
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
-const HEALTH_TEXT = 'GitHub Proxy is running securely.';
+const HEALTH_TEXT = 'GitHub Proxy is running.';
 const FORBIDDEN_TEXT = 'Forbidden: Invalid resource target.';
 
 const OWNER_REPO = '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+';
@@ -96,12 +96,11 @@ async function handle(request, env) {
     return text('Request Entity Too Large', 413);
   }
 
-  if (isPreflight(request)) return preflight(request);
+  if (request.method === 'OPTIONS' && request.headers.has('access-control-request-headers')) {
+    return preflight(request);
+  }
 
-  const rawTarget = extractTarget(current);
-  if (rawTarget === 'perl-pe-para') return perlRewrite(current.origin);
-
-  const target = parseTarget(rawTarget);
+  const target = parseTarget(current.href.slice(current.origin.length + 1));
   if (!target || !isAllowed(target)) return text(FORBIDDEN_TEXT, 403);
   if (target.hostname === 'github.com') {
     target.pathname = target.pathname.replace('/blob/', '/raw/');
@@ -110,36 +109,20 @@ async function handle(request, env) {
   return proxy(request, target);
 }
 
-function extractTarget(current) {
-  let target = current.href.slice(`${current.origin}/`.length);
-  const ownUrls = [`${current.origin}/`, `${current.origin.replace('://', ':/')}/`];
-  for (const ownUrl of ownUrls) {
-    while (target.startsWith(ownUrl)) target = target.slice(ownUrl.length);
-  }
-  return target;
-}
-
 function parseTarget(rawTarget, base) {
   let target = rawTarget.trim();
   if (!target) return null;
   if (/^[a-z][a-z\d+.-]*:/i.test(target) && !/^https?:/i.test(target)) return null;
 
-  if (base) {
-    try {
-      const url = new URL(target, base);
-      if (url.protocol === 'http:') url.protocol = 'https:';
-      return url.protocol === 'https:' ? url : null;
-    } catch {
-      return null;
-    }
+  if (!base) {
+    target = /^https?:/i.test(target)
+      ? target.replace(/^https?:\/*/i, 'https://')
+      : `https://${target}`;
   }
-
-  target = /^https?:/i.test(target)
-    ? target.replace(/^https?:\/*/i, 'https://')
-    : `https://${target}`;
 
   try {
     const url = new URL(target, base);
+    if (url.protocol === 'http:') url.protocol = 'https:';
     return url.protocol === 'https:' ? url : null;
   } catch {
     return null;
@@ -159,12 +142,6 @@ function isAllowed(url) {
   );
 }
 
-function canFollow(url, method) {
-  return ['GET', 'HEAD'].includes(method) && (
-    isAllowed(url) || (!url.port && REDIRECT_HOSTS.has(url.hostname.toLowerCase()))
-  );
-}
-
 async function proxy(request, target, redirects = 0) {
   const upstream = await fetch(target.href, upstreamInit(request, redirects === 0));
   const headers = new Headers(upstream.headers);
@@ -174,14 +151,19 @@ async function proxy(request, target, redirects = 0) {
   }
   const location = headers.get('location');
 
-  if (location) {
-    const redirect = parseTarget(location, target.href);
-    if (redirect && isAllowed(redirect)) {
+  const redirect = location ? parseTarget(location, target.href) : null;
+  if (redirect) {
+    if (isAllowed(redirect)) {
       headers.set('location', `/${redirect.href}`);
-    } else if (redirect && redirects < MAX_REDIRECTS && canFollow(redirect, request.method)) {
+    } else if (
+      redirects < MAX_REDIRECTS
+      && ['GET', 'HEAD'].includes(request.method)
+      && !redirect.port
+      && REDIRECT_HOSTS.has(redirect.hostname)
+    ) {
       await upstream.body?.cancel();
       return proxy(request, redirect, redirects + 1);
-    } else if (redirect) {
+    } else {
       headers.set('location', redirect.href);
     }
   }
@@ -210,10 +192,6 @@ function upstreamInit(request, forwardAuthorization) {
   };
 }
 
-function isPreflight(request) {
-  return request.method === 'OPTIONS' && request.headers.has('access-control-request-headers');
-}
-
 function preflight(request) {
   return new Response(null, {
     status: 204,
@@ -224,14 +202,6 @@ function preflight(request) {
       'access-control-max-age': '1728000',
     },
   });
-}
-
-function perlRewrite(origin) {
-  return text([
-    `s#(bash.*?\\.sh)([^/\\w\\d])#\\1 | perl -pe "\\$(curl -L ${origin}/perl-pe-para)" \\2#g`,
-    's# (git)# https://\\1#g',
-    `s#(http.*?git[^/]*?/)#${origin}/\\1#g`,
-  ].join('; '), 200, { 'cache-control': 'max-age=300' });
 }
 
 function text(body, status = 200, headers = {}) {

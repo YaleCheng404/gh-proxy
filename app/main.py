@@ -13,7 +13,7 @@ from starlette.background import BackgroundTask
 MAX_REDIRECTS = 3
 CHUNK_SIZE = 64 * 1024
 METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
-HEALTH_TEXT = "GitHub Proxy is running securely."
+HEALTH_TEXT = "GitHub Proxy is running."
 FORBIDDEN_TEXT = "Forbidden: Invalid resource target."
 PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
 
@@ -152,14 +152,10 @@ async def handler(request: Request, raw_target: str):
         return PlainTextResponse("Too Many Requests", 429, headers={"retry-after": "1"})
     if is_too_large(request.headers.get("content-length")):
         return PlainTextResponse("Request Entity Too Large", 413)
-    if is_preflight(request):
+    if request.method == "OPTIONS" and "access-control-request-headers" in request.headers:
         return preflight(request)
 
-    target = strip_nested_proxy(raw_target, str(request.base_url).rstrip("/"))
-    if target == "perl-pe-para":
-        return perl_rewrite(str(request.base_url).rstrip("/"))
-
-    target_url = parse_target(target, request.url.query)
+    target_url = parse_target(raw_target, request.url.query)
     if not target_url or not is_allowed(target_url):
         return PlainTextResponse(FORBIDDEN_TEXT, 403)
     if target_url.host == "github.com":
@@ -169,13 +165,6 @@ async def handler(request: Request, raw_target: str):
         return await proxy(request, target_url)
     except httpx.RequestError:
         return PlainTextResponse("Bad Gateway: Target server error or timeout.", 502)
-
-
-def strip_nested_proxy(target: str, origin: str) -> str:
-    for own_url in (origin, origin.replace("://", ":/")):
-        while target.startswith(own_url):
-            target = target[len(own_url) :].lstrip("/")
-    return target
 
 
 def parse_target(raw_target: str, query: str = "") -> httpx.URL | None:
@@ -208,48 +197,38 @@ def is_allowed(url: httpx.URL) -> bool:
     )
 
 
-def can_follow(url: httpx.URL, method: str) -> bool:
-    return method in {"GET", "HEAD"} and (
-        is_allowed(url)
-        or (url.scheme == "https" and url.port in {None, 443} and (url.host or "").lower() in REDIRECT_HOSTS)
-    )
-
-
-async def proxy(request: Request, target: httpx.URL, redirects: int = 0):
-    response = await send_upstream(request, target, redirects == 0)
-    if is_too_large(response.headers.get("content-length")):
-        await response.aclose()
-        return PlainTextResponse("Request Entity Too Large", 413)
-    location = response.headers.get("location")
-    redirect = parse_redirect(location, str(target)) if location else None
-
-    if redirect and is_allowed(redirect):
-        return stream_response(response, f"/{redirect}", request.method)
-    if redirect and redirects < MAX_REDIRECTS and can_follow(redirect, request.method):
-        await response.aclose()
-        return await proxy(request, redirect, redirects + 1)
-    return stream_response(response, str(redirect) if redirect else None, request.method)
-
-
-async def send_upstream(
-    request: Request,
-    target: httpx.URL,
-    forward_authorization: bool,
-) -> httpx.Response:
+async def proxy(request: Request, target: httpx.URL, redirects: int = 0) -> Response:
+    client = request.app.state.client
     headers = {
         key: value
         for key, value in request.headers.items()
         if key.lower() not in REQUEST_HEADERS_TO_DROP
     }
-    if not forward_authorization:
+    if redirects:
         headers.pop("authorization", None)
     content = request.stream() if request.method not in {"GET", "HEAD"} else None
-    upstream = request.app.state.client.build_request(request.method, target, headers=headers, content=content)
-    return await request.app.state.client.send(upstream, stream=True)
+    upstream = client.build_request(request.method, target, headers=headers, content=content)
+    response = await client.send(upstream, stream=True)
+    if is_too_large(response.headers.get("content-length")):
+        await response.aclose()
+        return PlainTextResponse("Request Entity Too Large", 413)
 
-
-def parse_redirect(location: str, base: str) -> httpx.URL | None:
-    return parse_target(urljoin(base, location))
+    location = response.headers.get("location")
+    redirect = parse_target(urljoin(str(target), location)) if location else None
+    if redirect:
+        if is_allowed(redirect):
+            location = f"/{redirect}"
+        elif (
+            redirects < MAX_REDIRECTS
+            and request.method in {"GET", "HEAD"}
+            and redirect.port in {None, 443}
+            and redirect.host in REDIRECT_HOSTS
+        ):
+            await response.aclose()
+            return await proxy(request, redirect, redirects + 1)
+        else:
+            location = str(redirect)
+    return stream_response(response, location, request.method)
 
 
 def stream_response(response: httpx.Response, location: str | None, method: str) -> Response:
@@ -272,10 +251,6 @@ def stream_response(response: httpx.Response, location: str | None, method: str)
     )
 
 
-def is_preflight(request: Request) -> bool:
-    return request.method == "OPTIONS" and "access-control-request-headers" in request.headers
-
-
 def preflight(request: Request) -> Response:
     return Response(status_code=204, headers={
         "access-control-allow-origin": "*",
@@ -283,12 +258,3 @@ def preflight(request: Request) -> Response:
         "access-control-allow-headers": request.headers.get("access-control-request-headers", "*"),
         "access-control-max-age": "1728000",
     })
-
-
-def perl_rewrite(origin: str) -> PlainTextResponse:
-    script = "; ".join([
-        rf's#(bash.*?\.sh)([^/\w\d])#\1 | perl -pe "\$(curl -L {origin}/perl-pe-para)" \2#g',
-        r"s# (git)# https://\1#g",
-        rf"s#(http.*?git[^/]*?/)#{origin}/\1#g",
-    ])
-    return PlainTextResponse(script, headers={"cache-control": "max-age=300"})

@@ -17,13 +17,13 @@ git clone https://proxy.example.com/https://github.com/user/repo.git
 - `raw.githubusercontent.com`、`raw.github.com`、`gist.githubusercontent.com`、`gist.github.com`。
 - `api.github.com`、`git.io`、`gitlab.com`、`gitlab.net`、`*.github.io`、`*.gitlab.io`。
 
-链接可以省略协议头，HTTP 自动升级为 HTTPS，GitHub `/blob/` 自动改写为 `/raw/`。不支持直接下载项目文件夹；其它主机、非标准 HTTPS 端口和不匹配的 GitHub 路径返回 `403`。
+链接可以省略协议头。HTTP 自动升级为 HTTPS，GitHub `/blob/` 自动改写为 `/raw/`。项目文件夹不能直接下载。未列出的主机、非标准 HTTPS 端口和不匹配的 GitHub 路径返回 `403`。
 
-首页支持 `/?q=<资源链接>`；`/healthz` 提供健康检查，`/perl-pe-para` 提供安装脚本的 Perl 重写规则。
+首页接收 `/?q=<资源链接>`。健康检查地址为 `/healthz`。
 
 ## Cloudflare Workers
 
-使用 Node.js 24 LTS 和 npm 12，在仓库根目录运行：
+使用 Node.js 26 LTS（26.13.0 或更高版本）和 npm 12.2.2，在仓库根目录运行：
 
 ```bash
 npm ci
@@ -41,7 +41,7 @@ npm run deploy
 
 ## Python / Docker
 
-推荐 Python 3.14。在仓库根目录创建并激活虚拟环境：
+使用 Python 3.15.2，在仓库根目录创建并激活虚拟环境：
 
 ```bash
 python -m venv .venv
